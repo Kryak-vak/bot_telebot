@@ -4,9 +4,12 @@ import markups as m
 import sqlite3
 import manage_db as db
 import datetime as dt
-from math import ceil
+from pytz import timezone
+from threading import Thread
+from time import sleep
 
 bot = telebot.TeleBot('1183262455:AAGPPikztj-dcxKaQNBJh7ltcEplibroJdc')
+tz = timezone('Europe/Moscow')
 
 
 @bot.message_handler(commands=['start'])
@@ -55,8 +58,7 @@ def got_lecturer(message, cathedra):
         bot.register_next_step_handler(message, got_lecturer, cathedra)
         return
 
-    new_user = {'id': message.chat.id, 'fullname': message.text, 'cathedra': cathedra}
-    db.insert_user(new_user)
+    db.insert_user({'id': message.chat.id, 'fullname': message.text, 'cathedra': cathedra})
 
     bot.send_message(message.chat.id, 'Отлично! Теперь можно приступать к работе\n\n'
                                       '(Если Вы случайно указали неправильные данные '
@@ -74,32 +76,25 @@ def handle_text(message):
                                       '\n> Автор проекта - Вакашев Шамиль\n'
                                       '\n • VK - https://vk.com/mr.vaflya'
                                       '\n • Почта - mr.vakashev@mail.ru\n'
-                                      '\n> Тестировщик проекта - [Владислав Ким](vladislavkim.ru/)',
+                                      '\n> Тестировщик - Владислав Ким\n'
+                                      '\n • [Инстаграмм](https://instagram.com/vladislavkim.dev)',
                      parse_mode='Markdown')
 
 
-@bot.message_handler(func=lambda mess: 'СегодняЗавтра'.find(mess.text) != -1, content_types=['text'])
+@bot.message_handler(func=lambda mess: mess.text == 'Сегодня' or mess.text == 'Завтра', content_types=['text'])
 def handle_text(message):
     if not db.check_id(message.chat.id):
         false_id_msg(message.chat.id)
         return
 
     if message.text == 'Сегодня':
-        date, lectures = get_lectures(message.chat.id, dt.date.today())
+        date, lectures = get_lectures(message.chat.id, dt.datetime.now(tz))
         answer = 'Сегодня - ' + int_date_to_string(date) + '\n\n'
     elif message.text == 'Завтра':
-        date, lectures = get_lectures(message.chat.id, dt.date.today() + dt.timedelta(days=1))
+        date, lectures = get_lectures(message.chat.id, dt.datetime.now(tz) + dt.timedelta(days=1))
         answer = 'Завтра - ' + int_date_to_string(date) + '\n\n'
 
-    if not lectures:
-        lecture_not_found_error(message.chat.id)
-        return
-
-    if lectures[date][0]:
-        answer += 'Расписание:\n\n     ' + '\n     '.join(lectures[date])
-    else:
-        answer = 'Ни одной пары! Можете отдыхать :)'
-
+    answer += get_answer(lectures, date, message.chat.id)
     bot.send_message(message.chat.id, answer)
 
 
@@ -112,19 +107,9 @@ def handle_text(message):
     answer = 'Расписание на ближаюшую неделю\n\n'
 
     for i in range(1, 8):
-        date = dt.date.today() + dt.timedelta(days=i)
+        date = dt.datetime.now(tz) + dt.timedelta(days=i)
         date, lectures = get_lectures(message.chat.id, date)
-
-        answer += int_date_to_string(date) + ':\n'
-
-        if not lectures:
-            lecture_not_found_error(message.chat.id)
-            return
-
-        if lectures[date][0]:
-            answer += '     ' + '\n     '.join(lectures[date]) + '\n\n'
-        else:
-            answer += 'Ни одной пары! Можете отдыхать :)\n\n'
+        answer += int_date_to_string(date) + ':\n\n' + get_answer(lectures, date, message.chat.id) + '\n'
 
     bot.send_message(message.chat.id, answer)
 
@@ -139,7 +124,7 @@ def handle_text(message):
              'Для переключения между месяцами нажмите "Предыдущий" или "Следующий"\n' \
              'Вернуться в основное меню можно нажав соответсвующую кнопку внизу"'
 
-    date = dt.date.today()
+    date = dt.datetime.now(tz)
     keyboard = create_month_keyboard(date)
     bot.send_message(message.chat.id, answer, reply_markup=keyboard)
     bot.register_next_step_handler(message, switch_months, date)
@@ -149,98 +134,131 @@ def switch_months(message, date):
     if message.text == 'Предыдущий':
         date -= dt.timedelta(days=date.day)
         keyboard = create_month_keyboard(date)
-
         bot.send_message(message.chat.id, f'Месяц переключён на {int_month_to_string(date.month)} {date.year}',
                          reply_markup=keyboard)
-        bot.register_next_step_handler(message, switch_months, date)
 
     elif message.text == 'Следующий':
         date += dt.timedelta(days=max_day(date.year, date.month) - date.day + 1)
         keyboard = create_month_keyboard(date)
-
         bot.send_message(message.chat.id, f'Месяц переключён на {int_month_to_string(date.month)} {date.year}',
                          reply_markup=keyboard)
-        bot.register_next_step_handler(message, switch_months, date)
 
-    elif message.text == 'Вернуться в основное меню':
-        bot.send_message(message.chat.id, 'Главное меню', reply_markup=m.command_markup)
+    elif message.text == 'Вернуться в основное меню' or message.text == '/mainmenu':
+        goto_main_menu(message)
+        return
 
-    elif message.text[0].isdigit():
-        keyboard = create_month_keyboard(date)
+    elif message.text[0].isdigit() and message.text.find(' ') != -1:
+        day = int(message.text[:message.text.find(' ')])
 
-        day = int(message.text[:message.text.find('-')])
-        fdate, lectures = get_lectures(message.chat.id, dt.date(date.year, date.month, day))
-        answer = int_date_to_string(fdate) + ':\n'
-
-        if not lectures:
-            lecture_not_found_error(message.chat.id)
+        if day > max_day(date.year, date.month) or day < 1:
+            bot.send_message(message.chat.id, 'Введён некорректный день, пожалуйста, не вводите данные вручную')
+            bot.register_next_step_handler(message, switch_months, date)
             return
 
-        if lectures[fdate][0]:
-            answer += '     ' + '\n     '.join(lectures[fdate]) + '\n\n'
-        else:
-            answer += 'Ни одной пары! Можете отдыхать :)\n\n'
+        fdate, lectures = get_lectures(message.chat.id, dt.datetime(date.year, date.month, day, tzinfo=tz))
+        answer = int_date_to_string(fdate) + ' ' + str(date.year) + ':\n\n' + get_answer(lectures, fdate, message.chat.id)
+        bot.send_message(message.chat.id, answer)
 
-        bot.send_message(message.chat.id, answer, reply_markup=keyboard)
-        bot.register_next_step_handler(message, switch_months, date)
-
-    else:
-        bot.register_next_step_handler(message, switch_months, date)
+    bot.register_next_step_handler(message, switch_months, date)
 
 
 def create_month_keyboard(date):
     count_days = max_day(date.year, date.month)
-    row_count, column_count = count_days // 6, 6
+    column_count, row_count = 6, count_days // 6
     month_keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    row_buttons = []
-    day = 1
+    row_buttons, day, button = [], 1, 0
 
     month_keyboard.row(types.InlineKeyboardButton('Предыдущий'),
+                       types.InlineKeyboardButton(int_month_to_string(date.month)),
                        types.InlineKeyboardButton('Следующий'))
-    month_keyboard.row(types.InlineKeyboardButton(int_month_to_string(date.month)))
 
-    for row in range(row_count):
-        for button in range(column_count):
-            text = f'{day}-ое {month_keyboard_buttons_text(date, day)}'
-            row_buttons.append(types.InlineKeyboardButton(text))
+    while count_days - day >= column_count:
+        while button != column_count:
+            if month_keyboard_buttons_text(date, day) != 'Вс':
+                text = f'{day} {month_keyboard_buttons_text(date, day)}'
+                row_buttons.append(types.InlineKeyboardButton(text))
+                button += 1
             day += 1
 
-        month_keyboard.row(row_buttons[0], row_buttons[1], row_buttons[2],
-                           row_buttons[3], row_buttons[4], row_buttons[5])
+        month_keyboard.row(row_buttons[0], row_buttons[1], row_buttons[2], row_buttons[3],
+                           row_buttons[4], row_buttons[5])
         row_buttons = []
+        button = 0
 
-    for button in range(count_days % column_count):
-        text = f'{day}-ое {month_keyboard_buttons_text(date, day)}'
-        row_buttons.append(types.InlineKeyboardButton(text))
-        day += 1
+    while button <= count_days - day:
+        if month_keyboard_buttons_text(date, day + button) != 'Вс':
+            text = f'{day + button} {month_keyboard_buttons_text(date, day + button)}'
+            row_buttons.append(types.InlineKeyboardButton(text))
+        button += 1
 
+    blank = types.InlineKeyboardButton('-')
     if len(row_buttons) == 1:
-        month_keyboard.row(row_buttons[0])
+        month_keyboard.row(row_buttons[0], blank, blank, blank, blank, blank)
+    elif len(row_buttons) == 2:
+        month_keyboard.row(row_buttons[0], row_buttons[1], blank, blank, blank, blank)
+    elif len(row_buttons) == 3:
+        month_keyboard.row(row_buttons[0], row_buttons[1], row_buttons[2], blank, blank, blank)
     elif len(row_buttons) == 4:
-        month_keyboard.row(row_buttons[0], row_buttons[1],
-                           row_buttons[2], row_buttons[3])
+        month_keyboard.row(row_buttons[0], row_buttons[1], row_buttons[2], row_buttons[3], blank, blank)
     elif len(row_buttons) == 5:
-        month_keyboard.row(row_buttons[0], row_buttons[1], row_buttons[2],
-                           row_buttons[3], row_buttons[4])
+        month_keyboard.row(row_buttons[0], row_buttons[1], row_buttons[2], row_buttons[3], row_buttons[4], blank)
 
     month_keyboard.row(types.InlineKeyboardButton('Вернуться в основное меню'))
 
     return month_keyboard
 
 
+@bot.message_handler(commands=['mainmenu'])
+def goto_main_menu(message):
+    bot.send_message(message.chat.id, 'Главное меню', reply_markup=m.command_markup)
+
+
+@bot.message_handler(func=lambda mess: 'Вернуться в основное меню' == mess.text, content_types=['text'])
+def handle_text(message):
+    goto_main_menu(message)
+
+
 def month_keyboard_buttons_text(date, day):
-    week_days = ['Пн.', 'Вт.', 'Ср.', 'Чт.', 'Пт.', 'Сб.', 'Вс.']
-    return week_days[dt.date(date.year, date.month, day).weekday()]
+    week_days = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс']
+    return week_days[dt.datetime(date.year, date.month, day, tzinfo=tz).weekday()]
 
 
 def get_lectures(chat_id, date):
     lectures = db.get_lectures_by_month(db.get_lecturer_by_id(chat_id), date.month)
     date = date_format(date)
+    db_date = date[:date.rfind('.')]
 
-    if date in lectures:
+    if db_date in lectures:
         return date, lectures
     else:
         return date, None
+
+
+def get_answer(lectures, date, chat_id):
+    if not lectures:
+        lecture_not_found_error(chat_id)
+        return 'Не найдено'
+
+    db_date = date[:date.rfind('.')]
+    schedule = get_schedule()
+    lecture_num = 1
+    no_lects = True
+    answer = ''
+
+    for lecture in lectures[db_date]:
+        answer += f'     {lecture_num}) {schedule[lecture_num - 1]}'
+        lecture_num += 1
+
+        if lecture != 'None':
+            answer += ' - ' + lecture + '\n'
+            no_lects = False
+        else:
+            answer += '\n'
+
+    if no_lects:
+        return 'Ни одной пары! Можете отдыхать :)\n\n'
+    else:
+        return answer
 
 
 def int_date_to_string(int_date):
@@ -250,7 +268,7 @@ def int_date_to_string(int_date):
               'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря']
     week_days = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье']
 
-    return f'{day}-ое {months[month - 1]} {week_days[dt.date(year, month, day).weekday()]}'
+    return f'{day}-ое {months[month - 1]} {week_days[dt.datetime(year, month, day, tzinfo=tz).weekday()]}'
 
 
 def int_month_to_string(int_month):
@@ -258,13 +276,6 @@ def int_month_to_string(int_month):
               'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь']
 
     return months[int(int_month) - 1]
-
-
-def string_month_to_int(string_month):
-    months = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
-              'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь']
-
-    return months.find(string_month) + 1
 
 
 def date_format(date):
@@ -286,6 +297,10 @@ def max_day(year, month):
     return max_days[month - 1]
 
 
+def get_schedule():
+    return ['8:30', '10:10', '11:50', '13:30', '15:10', '16:50']
+
+
 def false_id_msg(chat_id):
     bot.send_message(chat_id, 'Упс! Похоже информации о вас потерялась из базы данных :(\n'
                               'Пожалуйста, напишите /restart, чтобы я мог узнать кто Вы')
@@ -298,7 +313,59 @@ def lecture_not_found_error(chat_id):
                               'Приносим свои извенения :(', reply_markup=m.command_markup)
 
 
-for user_id in db.get_all_users_id():
-    bot.send_message(user_id, '> Произошла перезагрузка сервера', reply_markup=m.command_markup)
+def lecture_notification(notify_users):
+    for user_id in notify_users.keys():
+        try:
+            bot.send_message(user_id, 'До следующей пары осталось меньше 10 минут!\n\n'
+                                      '     ' + notify_users[user_id],
+                             reply_markup=m.command_markup)
+        except telebot.apihelper.ApiException:
+            db.remove_user_by_id(user_id)
 
-bot.polling(none_stop=True)
+
+def get_next_lectures(number):
+    notify_users = {}
+    date = dt.datetime.now(tz)
+
+    for user_id in db.get_all_users_id():
+        fdate, lectures = get_lectures(user_id, date)
+
+        if not lectures:
+            lecture_not_found_error(user_id)
+            continue
+
+        if lectures[fdate][number]:
+            notify_users[user_id] = lectures[fdate][number]
+
+    lecture_notification(notify_users)
+
+
+def which_lecture_soon():
+    while True:
+        time = dt.datetime.now()
+        schedule = [(8, 30), (10, 10), (11, 50), (13, 30), (15, 10), (16, 50)]
+        number = 0
+
+        for hour, minute in schedule:
+            timedelta = dt.datetime(time.year, time.month, time.day, hour, minute) - time
+
+            if timedelta.seconds < 600:
+                get_next_lectures(number)
+                sleep(540)
+                break
+
+            number += 1
+
+        sleep(60)
+
+
+if __name__ == '__main__':
+    Thread(target=which_lecture_soon).start()
+
+    bot.polling(none_stop=True)
+
+# for user_id in db.get_all_users_id():
+#     try:
+#         bot.send_message(user_id, '> Произошла перезагрузка сервера', reply_markup=m.command_markup)
+#     except telebot.apihelper.ApiException:
+#         db.remove_user_by_id(user_id)

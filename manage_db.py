@@ -53,6 +53,14 @@ def check_cathedra(cathedra):
         return False
 
 
+def get_all_lecturers():
+    with sqlite3.connect('lectures.db') as conn:
+        c = conn.cursor()
+
+        c.execute("SELECT fullname FROM lecturers")
+        return [i[0] for i in c.fetchall()]
+
+
 def get_lecturers_by_cathedra(cathedra):
     with sqlite3.connect('lectures.db') as conn:
         c = conn.cursor()
