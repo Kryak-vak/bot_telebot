@@ -8,7 +8,7 @@ from pytz import timezone
 from threading import Thread
 from time import sleep
 
-bot = telebot.TeleBot('1183262455:AAGPPikztj-dcxKaQNBJh7ltcEplibroJdc')
+bot = telebot.TeleBot('##################################')
 tz = timezone('Europe/Moscow')
 
 
